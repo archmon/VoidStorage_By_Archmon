@@ -21,10 +21,13 @@ import com.hypixel.hytale.server.core.inventory.container.filter.FilterActionTyp
 import com.hypixel.hytale.server.core.modules.entity.component.DisplayNameComponent;
 import com.hypixel.hytale.server.core.permissions.PermissionsModule;
 import com.hypixel.hytale.server.core.universe.PlayerRef;
+import com.hypixel.hytale.server.core.universe.world.World;
+import com.hypixel.hytale.server.core.universe.world.chunk.BlockOperations;
+import com.hypixel.hytale.server.core.universe.world.chunk.section.BlockSection;
+import com.hypixel.hytale.server.core.universe.world.storage.ChunkStore;
 import com.hypixel.hytale.server.core.universe.world.storage.EntityStore;
 import com.hypixel.hytale.server.core.util.BsonUtil;
 import org.bson.BsonDocument;
-import org.joml.Vector3i;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -609,7 +612,7 @@ class VoidStorageManager implements VoidStorageApi {
                     blockConfig.ownerName
             );
         } catch (Exception errCatch) {
-            System.err.println("VoidStorage] Failed to save VoidChest config for " + locationKey + ": " + errCatch.getMessage());
+            System.err.println("[VoidStorage] Failed to save VoidChest config for " + locationKey + ": " + errCatch.getMessage());
         }
     }
 
@@ -674,7 +677,24 @@ class VoidStorageManager implements VoidStorageApi {
         }
 
         try {
-            BlockType currentBlockType = player.getWorld().getBlockType(posX, posY, posZ);
+            World world = player.getWorld();
+            ChunkStore chunkStore = world.getChunkStore();
+            Ref<ChunkStore> sectionReference = chunkStore.getChunkSectionReferenceAtBlock(posX, posY, posZ);
+
+            if (sectionReference == null || !sectionReference.isValid()) {
+                return;
+            }
+
+            BlockSection blockSection = chunkStore.getStore().getComponent(sectionReference, BlockSection.getComponentType());
+
+            if (blockSection == null) {
+                return;
+            }
+
+            BlockType currentBlockType = BlockType.getAssetMap().getAssetOrDefault(
+                    blockSection.get(posX, posY, posZ),
+                    BlockType.UNKNOWN
+            );
 
             if (!this.isVoidChestBlock(currentBlockType)) {
                 return;
@@ -684,11 +704,15 @@ class VoidStorageManager implements VoidStorageApi {
                     ? VOID_CHEST_PUBLIC_VISUAL_STATE
                     : VOID_CHEST_PRIVATE_VISUAL_STATE;
 
-            assert currentBlockType != null;
-            player.getWorld().setBlockInteractionState(
-                    new Vector3i(posX, posY, posZ),
+            BlockOperations.setBlockInteractionState(
+                    chunkStore,
+                    sectionReference,
+                    posX,
+                    posY,
+                    posZ,
                     currentBlockType,
-                    visualState
+                    visualState,
+                    true
             );
         } catch (Exception errCatch) {
             System.err.println("[VoidStorage] Failed to sync VoidChest visual state at "
@@ -955,6 +979,8 @@ class VoidStorageManager implements VoidStorageApi {
             return simpleItemContainer;
         }
 
+        int invalidatedItemCount = 0;
+
         for (Map.Entry<Integer, SavedItem> entry : savedItems.entrySet()) {
             int inventorySlot = entry.getKey();
             SavedItem savedItem = entry.getValue();
@@ -974,7 +1000,8 @@ class VoidStorageManager implements VoidStorageApi {
                     try {
                         metadata = BsonDocument.parse(savedItem.metadata);
                     } catch (Exception metadataError) {
-                        System.err.println("[VoidStorage] Failed to parse metadata for " + debugName + " slot " + inventorySlot);
+                        System.err.println("[VoidStorage] Invalidated incompatible metadata for " + debugName
+                                + " slot " + inventorySlot + ": " + metadataError.getMessage());
                     }
                 }
 
@@ -988,8 +1015,20 @@ class VoidStorageManager implements VoidStorageApi {
 
                 itemStack = itemStack.withDurability(savedItem.durability);
                 simpleItemContainer.setItemStackForSlot((short) inventorySlot, itemStack);
-            } catch (Exception ignored) {
+            } catch (Exception invalidItemError) {
+                invalidatedItemCount++;
+                System.err.println("[VoidStorage] Invalidated incompatible saved item for " + debugName
+                        + " slot " + inventorySlot
+                        + " (id=" + savedItem.id
+                        + ", amount=" + savedItem.amount
+                        + "): " + invalidItemError.getMessage());
             }
+        }
+
+        if (invalidatedItemCount > 0) {
+            System.err.println("[VoidStorage] Invalidated " + invalidatedItemCount
+                    + " incompatible saved item(s) from " + debugName
+                    + ". The container will be saved without those old entries when it closes.");
         }
 
         return simpleItemContainer;
